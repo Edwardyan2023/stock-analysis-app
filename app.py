@@ -7,6 +7,7 @@ from datetime import datetime
 
 # --- 数据持久化配置 ---
 FILE_NAME = "trade_journal_v3.json"
+STOCKS_FILE = "stocks.txt"
 
 def load_data():
     if not os.path.exists(FILE_NAME):
@@ -21,55 +22,77 @@ def save_data(data):
     with open(FILE_NAME, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
-# --- 核心逻辑：股票匹配与数据抓取 ---
+# --- 核心逻辑：股票匹配（优先本地文件，解决未匹配问题） ---
 @st.cache_data(ttl=3600)
-def get_stock_list():
-    """获取全A股代码名称映射表"""
+def get_stock_dict():
+    """获取全A股字典：1.本地文件 -> 2.内置保底 -> 3.API"""
+    stock_map = {
+        "002315": "焦点科技",
+        "605499": "东鹏饮料",
+        "600519": "贵州茅台",
+        "000001": "平安银行"
+    }
+    
+    # 尝试从本地 stocks.txt 读取
+    if os.path.exists(STOCKS_FILE):
+        try:
+            with open(STOCKS_FILE, "r", encoding="utf-8") as f:
+                for line in f:
+                    parts = line.strip().split(",")
+                    if len(parts) == 2:
+                        code, name = parts
+                        stock_map[code.strip().zfill(6)] = name.strip()
+        except Exception as e:
+            st.sidebar.error(f"本地 stocks.txt 读取失败: {e}")
+
+    # 尝试 API 补充（如果网络通畅）
     try:
         df = ak.stock_zh_a_spot_em()
-        df['代码'] = df['代码'].astype(str)
-        return df[['代码', '名称']]
+        api_map = dict(zip(df['代码'].astype(str).str.zfill(6), df['名称']))
+        stock_map.update(api_map)
     except:
-        return pd.DataFrame(columns=['代码', '名称'])
+        pass # 联网失败则使用已有字典
+        
+    return stock_map
 
-def get_stock_info(input_val, stock_df):
-    """增强型双向匹配逻辑，解决补零与未匹配问题"""
+def get_stock_info(input_val, stock_dict):
+    """增强型匹配逻辑"""
     if not input_val: return "", ""
     
-    # 自动补齐6位代码 (针对深市等0开头的股票)
-    if input_val.isdigit() and len(input_val) < 6:
-        input_val = input_val.zfill(6)
+    search_val = input_val.strip()
+    # 自动补齐6位代码
+    if search_val.isdigit() and len(search_val) < 6:
+        search_val = search_val.zfill(6)
     
     # 代码精确匹配
-    match = stock_df[stock_df['代码'] == input_val]
-    if not match.empty:
-        return input_val, match.iloc[0]['名称']
+    if search_val in stock_dict:
+        return search_val, stock_dict[search_val]
     
     # 名称模糊匹配
-    match = stock_df[stock_df['名称'].str.contains(input_val, na=False)]
-    if not match.empty:
-        return match.iloc[0]['代码'], match.iloc[0]['名称']
-    
-    return input_val, "未匹配"
+    for code, name in stock_dict.items():
+        if search_val in name:
+            return code, name
+            
+    return search_val, "未匹配"
 
-# --- UI 样式定制 ---
+# --- UI 样式 ---
 st.set_page_config(page_title="A股复盘系统 V3", layout="wide")
 st.markdown("""
     <style>
+    .main { background-color: #f5f7f9; }
     .stTabs [data-baseweb="tab-list"] { gap: 10px; }
-    .stTabs [data-baseweb="tab"] { height: 50px; white-space: pre-wrap; background-color: #f8f9fa; border-radius: 5px; }
-    div[data-testid="stMetricValue"] { font-size: 24px; }
-    .stRadio > div { flex-direction: row !important; gap: 15px; }
+    .stTabs [data-baseweb="tab"] { height: 45px; background-color: #ffffff; border-radius: 5px; border: 1px solid #e0e0e0; }
+    .stMetric { background-color: #ffffff; padding: 15px; border-radius: 10px; box-shadow: 0 2px 4px rgba(0,0,0,0.05); }
+    .stRadio > div { flex-direction: row !important; gap: 20px; }
     </style>
 """, unsafe_allow_html=True)
 
 # 初始化数据
 if 'db' not in st.session_state:
     st.session_state.db = load_data()
-stock_df = get_stock_list()
+stock_dict = get_stock_dict()
 
-# --- 侧边栏/导航 ---
-tabs = st.tabs(["记录选股", "每日复盘", "交易日志", "统计面板"])
+tabs = st.tabs(["📌 记录选股", "📅 每日复盘", "📖 交易日志", "📊 统计面板"])
 
 # ================= Tab 1: 记录选股 =================
 with tabs[0]:
@@ -77,8 +100,8 @@ with tabs[0]:
     
     with col_l:
         st.subheader("基本信息")
-        search_val = st.text_input("股票代码 / 名称", value="002315", help="输入2315会自动匹配002315")
-        t_code, t_name = get_stock_info(search_val, stock_df)
+        search_val = st.text_input("股票代码 / 名称", value="002315")
+        t_code, t_name = get_stock_info(search_val, stock_dict)
         
         c1, c2 = st.columns(2)
         with c1: st.info(f"代码: **{t_code}**")
@@ -88,8 +111,8 @@ with tabs[0]:
         curr_price = st.number_input("当前价格", min_value=0.0, format="%.2f")
         
         c3, c4 = st.columns(2)
-        with c3: target_p = st.text_input("目标价")
-        with c4: stop_p = st.text_input("止损价")
+        with c3: target_p = st.text_input("目标价", value="--")
+        with c4: stop_p = st.text_input("止损价", value="--")
         
         status = st.selectbox("持仓状态", ["观察中", "持仓中", "已出局"])
 
@@ -103,7 +126,6 @@ with tabs[0]:
         total = f_s + c_s + t_s + m_s
         st.markdown(f"### 综合得分：**{total} / 20**")
 
-    # 入场逻辑清单
     st.divider()
     st.subheader("入场逻辑 · 检查清单")
     ck_col1, ck_col2 = st.columns(2)
@@ -116,72 +138,90 @@ with tabs[0]:
         ck5 = st.checkbox("宏观环境无明显系统性风险")
         ck6 = st.checkbox("仓位符合整体仓位管理规则")
 
-    # 分析笔记
     st.divider()
     st.subheader("分析笔记")
-    nb_col1, nb_col2 = st.columns(2)
-    with nb_col1:
-        n_base = st.text_area("基本面亮点", placeholder="业务护城河、财务指标、成长催化剂...")
-        n_cap = st.text_area("资金面观察", placeholder="超大单净流入、板块轮动、情绪...")
-    with nb_col2:
-        n_tech = st.text_area("技术面分析", placeholder="趋势、支撑压力位、K线形态、量价...")
-        n_risk = st.text_area("风险与不确定性", placeholder="宏观扰动、政策风险、个股风险...")
+    n_col1, n_col2 = st.columns(2)
+    with n_col1:
+        n_base = st.text_area("基本面与资金面亮点", placeholder="业务护城河、主力动向...")
+    with n_col2:
+        n_tech = st.text_area("技术面与风险点", placeholder="形态分析、潜在回撤风险...")
 
-    if st.button("保存记录", use_container_width=True):
+    if st.button("💾 保存该选股记录", use_container_width=True):
         new_rec = {
-            "code": t_code, "name": t_name, "date": str(rec_date),
-            "price": curr_price, "target": target_p, "stop": stop_p,
-            "status": status, "total": total, "notes": n_base,
-            "checklist": [ck1, ck2, ck3, ck4, ck5, ck6]
+            "代码": t_code, "名称": t_name, "日期": str(rec_date),
+            "当前价": curr_price, "目标价": target_p, "止损价": stop_p,
+            "状态": status, "综合得分": total, "笔记": n_base + " | " + n_tech
         }
         st.session_state.db["records"].append(new_rec)
         save_data(st.session_state.db)
-        st.success(f"{t_name} 记录已保存！")
+        st.success(f"已保存: {t_name} ({t_code})")
 
 # ================= Tab 2: 每日复盘 =================
 with tabs[1]:
-    st.subheader("今日市场 · 宏观环境")
-    r_col1, r_col2 = st.columns(2)
+    r_col1, r_col2 = st.columns([1, 1.5])
     with r_col1:
-        d_date = st.date_input("复盘日期", datetime.now())
+        st.subheader("市场宏观记录")
+        d_date = st.date_input("复盘日期", datetime.now(), key="rev_date")
         d_trend = st.selectbox("大盘走势", ["强劲上涨", "震荡向上", "窄幅震荡", "震荡下跌", "加速下跌"])
-        d_emo = st.selectbox("市场情绪", ["亢奋", "正常", "冷静", "恐慌"])
+        d_emo = st.select_slider("市场情绪", options=["恐慌", "冷静", "正常", "亢奋"], value="正常")
+        d_profit = st.number_input("今日账面盈亏 (元)", format="%.2f")
+    
     with r_col2:
-        d_strong = st.text_input("强势板块", placeholder="AI、跨境电商、新能源...")
-        d_weak = st.text_input("弱势板块", placeholder="地产、消费...")
-        d_news = st.text_area("关键政策 / 新闻", placeholder="影响今日盘面的重大消息...")
+        st.subheader("盘面核心观察")
+        d_strong = st.text_input("强势板块/主线", placeholder="如：AI算力、高股息等")
+        d_news = st.text_area("重大消息/政策感触", height=100)
     
-    st.subheader("持仓复盘")
-    d_act = st.text_area("今日操作", placeholder="买入/卖出哪些标的，执行情况...")
-    d_profit = st.text_input("今日盈亏 (元)", placeholder="正数盈利，负数亏损")
-    d_discipline = st.radio("执行纪律自评", ["1 很差", "2 较差", "3 一般", "4 较好", "5 完美"], horizontal=True)
-    
-    st.subheader("三问复盘")
-    q1 = st.text_area("做对了什么？", placeholder="今天哪些判断和操作是正确的...")
-    q2 = st.text_area("做错了什么？", placeholder="哪些地方出现偏差，原因是什么...")
-    q3 = st.text_area("明日计划", placeholder="重点关注标的、操作计划、注意事项...")
-    
-    if st.button("保存复盘", use_container_width=True):
-        new_rev = {"date": str(d_date), "trend": d_trend, "profit": d_profit, "plan": q3}
+    st.divider()
+    st.subheader("三问深思")
+    q_col1, q_col2, q_col3 = st.columns(3)
+    with q_col1: q1 = st.text_area("做对了什么？", height=150)
+    with q_col2: q2 = st.text_area("做错了什么？", height=150)
+    with q_col3: q3 = st.text_area("明日计划/警示", height=150)
+
+    if st.button("📝 提交今日复盘", use_container_width=True):
+        new_rev = {
+            "日期": str(d_date), "大盘走势": d_trend, "盈亏": d_profit, 
+            "主线": d_strong, "做对": q1, "做错": q2, "计划": q3
+        }
         st.session_state.db["reviews"].append(new_rev)
         save_data(st.session_state.db)
-        st.success("今日复盘已保存！")
+        st.success("今日复盘档案已存入数据库！")
 
-# ================= Tab 3 & 4: 统计与展示 (略) =================
+# ================= Tab 3: 交易日志 =================
 with tabs[2]:
-    if st.session_state.db["records"]:
-        st.dataframe(pd.DataFrame(st.session_state.db["records"]), use_container_width=True)
-    else:
-        st.info("尚无选股记录")
-
-with tabs[3]:
-    st.subheader("复盘数据概览")
+    st.subheader("选股历史记录")
     if st.session_state.db["records"]:
         df_recs = pd.DataFrame(st.session_state.db["records"])
-        s1, s2, s3, s4 = st.columns(4)
-        s1.metric("总记录数", len(df_recs))
-        s2.metric("胜率", "--")
-        s3.metric("平均评分", round(df_recs['total'].mean(), 1))
-        s4.metric("累计盈亏", "0.00")
+        st.dataframe(df_recs, use_container_width=True)
+        
+        if st.button("🗑️ 清空所有选股记录", type="secondary"):
+            st.session_state.db["records"] = []
+            save_data(st.session_state.db)
+            st.rerun()
     else:
-        st.warning("暂无统计数据")
+        st.info("暂无数据，请在‘记录选股’标签页添加。")
+
+# ================= Tab 4: 统计面板 =================
+with tabs[3]:
+    if st.session_state.db["records"]:
+        df_all = pd.DataFrame(st.session_state.db["records"])
+        
+        # 顶部统计指标
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("研究标的总数", len(df_all))
+        m2.metric("平均综合评分", f"{round(df_all['综合得分'].mean(), 1)} / 20")
+        
+        # 状态分布
+        st.subheader("持仓状态统计")
+        status_count = df_all['状态'].value_counts()
+        st.bar_chart(status_count)
+        
+        # 历史复盘回顾
+        st.divider()
+        st.subheader("历史复盘回顾")
+        if st.session_state.db["reviews"]:
+            st.table(pd.DataFrame(st.session_state.db["reviews"]).tail(5))
+        else:
+            st.write("暂无每日复盘记录")
+    else:
+        st.warning("数据量不足，无法生成统计图表。")
