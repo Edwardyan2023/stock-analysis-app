@@ -5,7 +5,7 @@ import json
 import os
 from datetime import datetime
 
-# ===== 配置与数据持久化 =====
+# --- 数据持久化配置 ---
 FILE_NAME = "trade_journal_v3.json"
 
 def load_data():
@@ -21,56 +21,63 @@ def save_data(data):
     with open(FILE_NAME, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=2)
 
+# --- 核心逻辑：股票匹配与数据抓取 ---
 @st.cache_data(ttl=3600)
 def get_stock_list():
-    """实时获取全A股代码名称表"""
+    """获取全A股代码名称映射表"""
     try:
         df = ak.stock_zh_a_spot_em()
+        df['代码'] = df['代码'].astype(str)
         return df[['代码', '名称']]
     except:
         return pd.DataFrame(columns=['代码', '名称'])
 
-# ===== 逻辑处理 =====
 def get_stock_info(input_val, stock_df):
+    """增强型双向匹配逻辑，解决补零与未匹配问题"""
     if not input_val: return "", ""
-    # 优先匹配代码
+    
+    # 自动补齐6位代码 (针对深市等0开头的股票)
+    if input_val.isdigit() and len(input_val) < 6:
+        input_val = input_val.zfill(6)
+    
+    # 代码精确匹配
     match = stock_df[stock_df['代码'] == input_val]
     if not match.empty:
         return input_val, match.iloc[0]['名称']
-    # 模糊匹配名称
+    
+    # 名称模糊匹配
     match = stock_df[stock_df['名称'].str.contains(input_val, na=False)]
     if not match.empty:
         return match.iloc[0]['代码'], match.iloc[0]['名称']
+    
     return input_val, "未匹配"
 
-# ===== 页面 UI =====
-st.set_page_config(page_title="A股复盘系统", layout="wide")
-
-# 加载数据到 SessionState
-if 'db' not in st.session_state:
-    st.session_state.db = load_data()
-
-stock_df = get_stock_list()
-
-# 自定义 CSS 样式
+# --- UI 样式定制 ---
+st.set_page_config(page_title="A股复盘系统 V3", layout="wide")
 st.markdown("""
     <style>
-    .stRadio > div { flex-direction: row !important; }
-    .reportview-container .main .block-container { padding-top: 2rem; }
-    .stMetric { background-color: #f0f2f6; padding: 10px; border-radius: 10px; }
+    .stTabs [data-baseweb="tab-list"] { gap: 10px; }
+    .stTabs [data-baseweb="tab"] { height: 50px; white-space: pre-wrap; background-color: #f8f9fa; border-radius: 5px; }
+    div[data-testid="stMetricValue"] { font-size: 24px; }
+    .stRadio > div { flex-direction: row !important; gap: 15px; }
     </style>
 """, unsafe_allow_html=True)
 
-# 顶部导航
-tab1, tab2, tab3, tab4 = st.tabs(["📌 记录选股", "📅 每日复盘", "📖 交易日志", "📊 统计面板"])
+# 初始化数据
+if 'db' not in st.session_state:
+    st.session_state.db = load_data()
+stock_df = get_stock_list()
 
-# --- 1. 记录选股 ---
-with tab1:
+# --- 侧边栏/导航 ---
+tabs = st.tabs(["记录选股", "每日复盘", "交易日志", "统计面板"])
+
+# ================= Tab 1: 记录选股 =================
+with tabs[0]:
     col_l, col_r = st.columns([1, 1])
     
     with col_l:
         st.subheader("基本信息")
-        search_val = st.text_input("股票代码 / 名称", value="002315")
+        search_val = st.text_input("股票代码 / 名称", value="002315", help="输入2315会自动匹配002315")
         t_code, t_name = get_stock_info(search_val, stock_df)
         
         c1, c2 = st.columns(2)
@@ -78,7 +85,7 @@ with tab1:
         with c2: st.info(f"名称: **{t_name}**")
         
         rec_date = st.date_input("记录日期", datetime.now())
-        price = st.number_input("当前价格", min_value=0.0, step=0.01)
+        curr_price = st.number_input("当前价格", min_value=0.0, format="%.2f")
         
         c3, c4 = st.columns(2)
         with c3: target_p = st.text_input("目标价")
@@ -88,77 +95,93 @@ with tab1:
 
     with col_r:
         st.subheader("四维评分")
-        f_score = st.radio("① 基本面评分", [1,2,3,4,5], index=2, horizontal=True)
-        c_score = st.radio("② 资金面评分", [1,2,3,4,5], index=2, horizontal=True)
-        t_score = st.radio("③ 技术面评分", [1,2,3,4,5], index=2, horizontal=True)
-        m_score = st.radio("④ 宏观面评分", [1,2,3,4,5], index=2, horizontal=True)
+        f_s = st.radio("① 基本面评分", [1,2,3,4,5], index=2, key="fs")
+        c_s = st.radio("② 资金面评分", [1,2,3,4,5], index=2, key="cs")
+        t_s = st.radio("③ 技术面评分", [1,2,3,4,5], index=2, key="ts")
+        m_s = st.radio("④ 宏观环境评分", [1,2,3,4,5], index=2, key="ms")
         
-        total = f_score + c_score + t_score + m_score
-        st.metric("核心决策得分", f"{total} / 20")
+        total = f_s + c_s + t_s + m_s
+        st.markdown(f"### 综合得分：**{total} / 20**")
 
+    # 入场逻辑清单
     st.divider()
-    notes = st.text_area("分析笔记", placeholder="输入入场逻辑、护城河、风险点...")
-    
+    st.subheader("入场逻辑 · 检查清单")
+    ck_col1, ck_col2 = st.columns(2)
+    with ck_col1:
+        ck1 = st.checkbox("基本面逻辑清晰，催化剂明确")
+        ck2 = st.checkbox("主力资金净流入，板块处于风口")
+        ck3 = st.checkbox("技术面处于上升趋势或突破确认")
+    with ck_col2:
+        ck4 = st.checkbox("止损位设定，风险收益比 ≥ 1:2")
+        ck5 = st.checkbox("宏观环境无明显系统性风险")
+        ck6 = st.checkbox("仓位符合整体仓位管理规则")
+
+    # 分析笔记
+    st.divider()
+    st.subheader("分析笔记")
+    nb_col1, nb_col2 = st.columns(2)
+    with nb_col1:
+        n_base = st.text_area("基本面亮点", placeholder="业务护城河、财务指标、成长催化剂...")
+        n_cap = st.text_area("资金面观察", placeholder="超大单净流入、板块轮动、情绪...")
+    with nb_col2:
+        n_tech = st.text_area("技术面分析", placeholder="趋势、支撑压力位、K线形态、量价...")
+        n_risk = st.text_area("风险与不确定性", placeholder="宏观扰动、政策风险、个股风险...")
+
     if st.button("保存记录", use_container_width=True):
         new_rec = {
             "code": t_code, "name": t_name, "date": str(rec_date),
-            "price": price, "target": target_p, "stop": stop_p,
-            "status": status, "total": total, "notes": notes,
-            "scores": [f_score, c_score, t_score, m_score]
+            "price": curr_price, "target": target_p, "stop": stop_p,
+            "status": status, "total": total, "notes": n_base,
+            "checklist": [ck1, ck2, ck3, ck4, ck5, ck6]
         }
         st.session_state.db["records"].append(new_rec)
         save_data(st.session_state.db)
-        st.success(f"已保存 {t_name} 的复盘记录！")
+        st.success(f"{t_name} 记录已保存！")
 
-# --- 2. 每日复盘 ---
-with tab2:
-    st.subheader("每日市场环境综述")
+# ================= Tab 2: 每日复盘 =================
+with tabs[1]:
+    st.subheader("今日市场 · 宏观环境")
     r_col1, r_col2 = st.columns(2)
     with r_col1:
-        m_trend = st.selectbox("大盘走势", ["上涨", "震荡", "下跌"])
-        m_emotion = st.selectbox("市场情绪", ["亢奋", "正常", "恐慌"])
+        d_date = st.date_input("复盘日期", datetime.now())
+        d_trend = st.selectbox("大盘走势", ["强劲上涨", "震荡向上", "窄幅震荡", "震荡下跌", "加速下跌"])
+        d_emo = st.selectbox("市场情绪", ["亢奋", "正常", "冷静", "恐慌"])
     with r_col2:
-        s_sector = st.text_input("强势板块")
-        w_sector = st.text_input("弱势板块")
+        d_strong = st.text_input("强势板块", placeholder="AI、跨境电商、新能源...")
+        d_weak = st.text_input("弱势板块", placeholder="地产、消费...")
+        d_news = st.text_area("关键政策 / 新闻", placeholder="影响今日盘面的重大消息...")
     
-    daily_act = st.text_area("今日操作与盈亏")
+    st.subheader("持仓复盘")
+    d_act = st.text_area("今日操作", placeholder="买入/卖出哪些标的，执行情况...")
+    d_profit = st.text_input("今日盈亏 (元)", placeholder="正数盈利，负数亏损")
+    d_discipline = st.radio("执行纪律自评", ["1 很差", "2 较差", "3 一般", "4 较好", "5 完美"], horizontal=True)
     
-    review_col1, review_col2 = st.columns(2)
-    with review_col1:
-        good_point = st.text_area("做对了什么？")
-    with review_col2:
-        bad_point = st.text_area("做错了什么？")
+    st.subheader("三问复盘")
+    q1 = st.text_area("做对了什么？", placeholder="今天哪些判断和操作是正确的...")
+    q2 = st.text_area("做错了什么？", placeholder="哪些地方出现偏差，原因是什么...")
+    q3 = st.text_area("明日计划", placeholder="重点关注标的、操作计划、注意事项...")
     
-    next_plan = st.text_area("明日计划")
-    
-    if st.button("提交复盘", use_container_width=True):
-        new_rev = {
-            "date": str(datetime.now().date()), "trend": m_trend, 
-            "emotion": m_emotion, "action": daily_act, 
-            "good": good_point, "bad": bad_point, "plan": next_plan
-        }
+    if st.button("保存复盘", use_container_width=True):
+        new_rev = {"date": str(d_date), "trend": d_trend, "profit": d_profit, "plan": q3}
         st.session_state.db["reviews"].append(new_rev)
         save_data(st.session_state.db)
-        st.toast("今日复盘已存档")
+        st.success("今日复盘已保存！")
 
-# --- 4. 统计面板 ---
-with tab4:
-    recs = st.session_state.db["records"]
-    if recs:
-        df = pd.DataFrame(recs)
-        s_col1, s_col2, s_col3 = st.columns(3)
-        s_col1.metric("总记录数", len(df))
-        s_col2.metric("平均评分", round(df['total'].mean(), 2))
-        s_col3.metric("最高评分", df['total'].max())
-        
-        st.subheader("评分分布趋势")
-        st.line_chart(df['total'])
-    else:
-        st.info("暂无数据，请先开始记录。")
-
-# --- 3. 交易日志 (查看历史) ---
-with tab3:
+# ================= Tab 3 & 4: 统计与展示 (略) =================
+with tabs[2]:
     if st.session_state.db["records"]:
         st.dataframe(pd.DataFrame(st.session_state.db["records"]), use_container_width=True)
     else:
-        st.write("日志为空")
+        st.info("尚无选股记录")
+
+with tabs[3]:
+    st.subheader("复盘数据概览")
+    if st.session_state.db["records"]:
+        df_recs = pd.DataFrame(st.session_state.db["records"])
+        s1, s2, s3, s4 = st.columns(4)
+        s1.metric("总记录数", len(df_recs))
+        s2.metric("胜率", "--")
+        s3.metric("平均评分", round(df_recs['total'].mean(), 1))
+        s4.metric("累计盈亏", "0.00")
+    else:
+        st.warning("暂无统计数据")
